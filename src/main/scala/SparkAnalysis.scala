@@ -105,7 +105,7 @@ object SparkAnalysis {
       //  val classConections = EdgeRDD.fromEdges()
         classesWithAttributes.saveAsTextFile(outputpathTxt)
 
-
+//with a tag
    }
 
 }
