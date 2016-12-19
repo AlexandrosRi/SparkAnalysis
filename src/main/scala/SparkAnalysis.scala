@@ -1,12 +1,10 @@
-import java.io.{File, FileInputStream, StringReader}
+import java.io.{File, StringReader}
 
 import scala.io.Source
 import scala.collection.JavaConverters._
 
 import org.apache.spark.SparkContext
-import org.apache.spark.SparkContext._
 import org.apache.spark.SparkConf
-import org.apache.spark._
 import org.apache.spark.graphx._
 // To make some of the examples work we will also need RDD
 import org.apache.spark.rdd.RDD
@@ -60,7 +58,7 @@ object SparkAnalysis {
       }
     }
 
-    def getMethodsString(javaContent:String)= {
+    def getMethodsString(x1: String, javaContent:String)= {
 
       val in: StringReader = new StringReader(javaContent)
       var methodsString = List("")
@@ -69,34 +67,41 @@ object SparkAnalysis {
 
         val cu: CompilationUnit = JavaParser.parse(in)
 
-        methodsString = getMethods(cu)
-        //.map(x => (x.split(":")(0), x.split(":")(1)));
+        methodsString = getMethods(x1, cu)
       }
       finally {
         in.close()
       }
-      //    val methString = methodsString
       methodsString
     }
 
 
-    def getMethods(cu: CompilationUnit) = {
+    def getMethods(x1: String, cu: CompilationUnit) = {
 
       val types: List[TypeDeclaration] = cu.getTypes.asScala.toList
 
       var methodsString = ""
+      var flag = false
       for (astType: TypeDeclaration <- types) {
         val members = astType.getMembers.asScala.toList
         for (member <- members) {
           member match {
             case method: FieldDeclaration =>
-              methodsString += method.getType.toString + ":" + method.getVariables.get(0).getId.toString + ", "
+              methodsString += method.getType.toString + ":" + method.getVariables.get(0).getId.toString + "----"
+              flag = true
             case _ =>
           }
         }
       }
 
-      methodsString.stripSuffix(", ").split(", ").toList
+      flag match{
+        case false =>
+
+          List("none:n")
+        case true =>
+   //       println("****" + x1)
+          methodsString.stripSuffix("----").split("----").toList
+      }
     }
 
     def classHash(name: String): VertexId = {
@@ -109,11 +114,16 @@ object SparkAnalysis {
         methodData.saveAsTextFile(outputpath)
          */
 
+    val inputLG = "/home/hduser/input2"
+    val inputSM = "/home/hduser/dpl/input"
 
-    val inputdata = sc.parallelize(getContext("/home/hduser/dpl/input"))
+    val inputdata = sc.parallelize(getContext(inputLG))
 
     case class ClassData(fqName: String, attrs: List[(String, String)])
-    val classes = inputdata.map(x => ClassData(x._1, getMethodsString(x._2).map(x => (x.split(":")(0), x.split(":")(1)))))
+    val classes = inputdata.map(x => ClassData(x._1, getMethodsString(x._1, x._2).map(a => {
+      println(x._1)
+      (a.split(":")(0), a.split(":")(1))
+    })))
 
     val vertices = classes.map(x => (classHash(x.fqName), (x.fqName, x.attrs)))
 
@@ -129,7 +139,7 @@ object SparkAnalysis {
     val graph = Graph(vertices, edges, defaultClass)
 
 
-    println(graph.vertices.top(5)(Ordering.by(_._2._1)).mkString("\n"))
+    println(graph.vertices.collect.mkString("\n"))
 
 
    }
