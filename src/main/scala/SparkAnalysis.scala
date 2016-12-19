@@ -21,28 +21,34 @@ import com.github.javaparser.{ASTHelper, InstanceJavaParser, JavaParser, StringP
 object SparkAnalysis {
 
   def main(args: Array[String]) {
-//test
+    //test
     val hdfspath:String = "hdfs://localhost:9000/user/hduser/"
     //val inputpath = hdfspath + "input"
-    //val localInputPath1 = "file:///home/hduser/input"
-    //val localInputPath2 = "file:///home/hduser/input,file:///home/hduser/input2"
-    //val localInputPathLG = "file:///home/hduser/inputMassive"
     val outputpathSeq = hdfspath + "outputSeq"
     val outputpathTxt = hdfspath + "outputTxt"
     val conf = new SparkConf().setAppName("Spark Analysis")
     val sc = new SparkContext(conf)
 
-    //val inputdata = sc.wholeTextFiles(inputpath)
-    //val inputdata = sc.wholeTextFiles(localInputPathLG)
-    
+
+
+
+
+/*
+    val inputdata = getContext("/home/hduser/dpl/input")
+    val methodData = inputdata.map(x => (x._1.hashCode.toLong, (x._1, getMethodsString(x._2))))
+    val data = sc.parallelize(methodData)
+        val classesWithAttributes: RDD[(VertexId, (String, List[String]))] = data
+*/
+
+
 
 
     def getContext(dir: String): List[(String,String)] = {
       val files = getListOfFiles(dir)
       //println("I reached here")
-      val fnc:List[(String,String)] = files.map(x => (x.getName, Source.fromFile(x).mkString + "\n"))
+      val fnc:List[(String,String)] = files.map(x => (x.getName.stripSuffix(".java"), Source.fromFile(x).mkString + "\n"))
       
-      return fnc
+      fnc
     }
 
     def getListOfFiles(dir: String):List[File] = {
@@ -63,7 +69,8 @@ object SparkAnalysis {
 
         val cu: CompilationUnit = JavaParser.parse(in)
 
-        methodsString = getMethods(cu);
+        methodsString = getMethods(cu)
+        //.map(x => (x.split(":")(0), x.split(":")(1)));
       }
       finally {
         in.close()
@@ -92,20 +99,39 @@ object SparkAnalysis {
       methodsString.stripSuffix(", ").split(", ").toList
     }
 
+    def classHash(name: String): VertexId = {
+      name.toLowerCase.replace(" ", "").hashCode.toLong
+    }
+
+
     /*
         val methodData = inputdata.map(x => (x._1, getMethodsString(x._1, x._2)))
         methodData.saveAsTextFile(outputpath)
          */
 
-        val inputdata = getContext("/home/hduser/dpl/input")
-        val methodData = inputdata.map(x => (x._1.hashCode.toLong, (x._1, getMethodsString(x._2))))
-        val data = sc.parallelize(methodData)
 
-        val classesWithAttributes: RDD[(VertexId, (String, List[String]))] = data
-      //  val classConections = EdgeRDD.fromEdges()
-        classesWithAttributes.saveAsTextFile(outputpathTxt)
+    val inputdata = sc.parallelize(getContext("/home/hduser/dpl/input"))
 
-//with a tag
+    case class ClassData(fqName: String, attrs: List[(String, String)])
+    val classes = inputdata.map(x => ClassData(x._1, getMethodsString(x._2).map(x => (x.split(":")(0), x.split(":")(1)))))
+
+    val vertices = classes.map(x => (classHash(x.fqName), (x.fqName, x.attrs)))
+
+    val edges: RDD[Edge[String]] = classes.flatMap { x =>
+      val srcVid = classHash(x.fqName)
+      x.attrs.map { field =>
+        val dstVid = classHash(field._1)
+        Edge(srcVid, dstVid, "has field")
+      }
+    }
+
+    val defaultClass = ("Java Native", List(("int","a"), ("String","b")))
+    val graph = Graph(vertices, edges, defaultClass)
+
+
+    println(graph.vertices.top(5)(Ordering.by(_._2._1)).mkString("\n"))
+
+
    }
 
 }
