@@ -1,12 +1,10 @@
 import java.io.{File, StringReader}
-
 import scala.io.Source
 import scala.collection.JavaConverters._
 
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkConf
 import org.apache.spark.graphx._
-// To make some of the examples work we will also need RDD
 import org.apache.spark.rdd.RDD
 
 import com.github.javaparser.ast.body._
@@ -19,33 +17,16 @@ import com.github.javaparser.{ASTHelper, InstanceJavaParser, JavaParser, StringP
 object SparkAnalysis {
 
   def main(args: Array[String]) {
-    //test
     val hdfspath:String = "hdfs://localhost:9000/user/hduser/"
-    //val inputpath = hdfspath + "input"
     val outputpathSeq = hdfspath + "outputSeq"
     val outputpathTxt = hdfspath + "outputTxt"
     val conf = new SparkConf().setAppName("Spark Analysis")
     val sc = new SparkContext(conf)
 
-
-
-
-
-/*
-    val inputdata = getContext("/home/hduser/dpl/input")
-    val methodData = inputdata.map(x => (x._1.hashCode.toLong, (x._1, getMethodsString(x._2))))
-    val data = sc.parallelize(methodData)
-        val classesWithAttributes: RDD[(VertexId, (String, List[String]))] = data
-*/
-
-
-
-
+    /*  Directory parsing helper methods  */
     def getContext(dir: String): List[(String,String)] = {
       val files = getListOfFiles(dir)
-      //println("I reached here")
       val fnc:List[(String,String)] = files.map(x => (x.getName.stripSuffix(".java"), Source.fromFile(x).mkString + "\n"))
-      
       fnc
     }
 
@@ -58,15 +39,14 @@ object SparkAnalysis {
       }
     }
 
-    def getMethodsString(x1: String, javaContent:String)= {
+    /* FIELDS: helper methods and case class  */
+    def getMethodsString(x1: String, javaContent:String) = {
 
       val in: StringReader = new StringReader(javaContent)
       var methodsString = List("")
 
       try {
-
         val cu: CompilationUnit = JavaParser.parse(in)
-
         methodsString = getMethods(x1, cu)
       }
       finally {
@@ -79,9 +59,9 @@ object SparkAnalysis {
     def getMethods(x1: String, cu: CompilationUnit) = {
 
       val types: List[TypeDeclaration] = cu.getTypes.asScala.toList
-
       var methodsString = ""
       var flag = false
+
       for (astType: TypeDeclaration <- types) {
         val members = astType.getMembers.asScala.toList
         for (member <- members) {
@@ -96,10 +76,8 @@ object SparkAnalysis {
 
       flag match{
         case false =>
-
           List("none:n")
         case true =>
-   //       println("****" + x1)
           methodsString.stripSuffix("----").split("----").toList
       }
     }
@@ -108,23 +86,22 @@ object SparkAnalysis {
       name.toLowerCase.replace(" ", "").hashCode.toLong
     }
 
-
-    /*
-        val methodData = inputdata.map(x => (x._1, getMethodsString(x._1, x._2)))
-        methodData.saveAsTextFile(outputpath)
-         */
-
     val inputLG = "/home/hduser/input2"
     val inputSM = "/home/hduser/dpl/input"
 
-    val inputdata = sc.parallelize(getContext(inputLG))
+    val inputdata = sc.parallelize(getContext(inputSM))
+
+    /*
+      Refactor to make easier filling with only one parsing
+      case class ClassData(fqName: String, attrs: List[(String, String)], ext: String)
+    */
 
     case class ClassData(fqName: String, attrs: List[(String, String)])
     val classes = inputdata.map(x => ClassData(x._1, getMethodsString(x._1, x._2).map(a => {
-      println(x._1)
-      (a.split(":")(0), a.split(":")(1))
-    })))
+       (a.split(":")(0), a.split(":")(1))
+    }))) //      Refactor to make easier filling with only one parsing
 
+    /* FIELDS: vertices | edges | graph  */
     val vertices = classes.map(x => (classHash(x.fqName), (x.fqName, x.attrs)))
 
     val edges: RDD[Edge[String]] = classes.flatMap { x =>
@@ -138,48 +115,50 @@ object SparkAnalysis {
     val defaultClass = ("Java Native", List(("int","a"), ("String","b")))
     val graph = Graph(vertices, edges, defaultClass)
 
-
-    println(graph.vertices.collect.mkString("\n"))
-
-
-   }
-
-}
+//    println(graph.edges.collect.mkString("\n"))
 
 
-/* def getMethodsString(fName:String, javaContent:String): String = {
-//def getMethodsString(javaContent:String): String = {
-  val in: StringReader = new StringReader(javaContent)
-  var methodsString = " "
+    /* INHERITANCE: helper methods and case class  */
+    def getExt(javaContent: String): String = {
+      val in: StringReader = new StringReader(javaContent)
+      var ext: String = ""
 
-  try {
-    //println("Attempting to parse: "+fName)
-    val cu: CompilationUnit = JavaParser.parse(in)
+      try {
 
-    methodsString = getMethods(cu);
+        val cu: CompilationUnit = JavaParser.parse(in)
 
-  }
-  finally {
-    in.close()
-  }
-  return methodsString
-}
+        val types: List[TypeDeclaration] = cu.getTypes.asScala.toList
 
-def getMethods(cu: CompilationUnit): String ={
-
-  val types:List[TypeDeclaration] = cu.getTypes.asScala.toList
-  var methodsString = " "
-  for (astType:TypeDeclaration <- types) {
-    val members = astType.getMembers.asScala.toList
-    for (member <- members) {
-      member match {
-        //case method: MethodDeclaration =>
-          //methodsString += method.getDeclarationAsString + ", "
-        case method: FieldDeclaration =>
-          methodsString += method.getType.toString  + ":" + method.getVariables.get(0).getId.toString + ", "
-        case _ =>
+        for (astType: TypeDeclaration <- types) {
+          astType match {
+            case astType: ClassOrInterfaceDeclaration =>
+              println(astType.getName + ":" + classHash(astType.getName)+ " extends " + astType.getExtends.toString)
+              ext = astType.getExtends.toString.stripSuffix("]").stripPrefix("[")
+            case _ =>
+          }
+        }
       }
+      finally {
+        in.close()
+      }
+      ext
     }
+    case class ClassDataExt(fqName: String, ext: String)
+    val classesExt = inputdata.map(x => ClassDataExt(x._1, getExt(x._2)))
+
+    /* INHERITANCE: vertices | edges | graph  */
+    val verticesExt: RDD[(VertexId, (String, String))] = classesExt.map(x => (classHash(x.fqName),(x.fqName, x.ext)))
+
+    val edgesExt: RDD[Edge[String]] = classesExt.map { x =>
+      val srcVidExt = classHash(x.fqName)
+      val dstVidExt = classHash(x.ext)
+      Edge(srcVidExt, dstVidExt, "extends")
+      }
+
+    val defaultClassExt = ("ext","ext")
+    val graphExt = Graph(verticesExt, edgesExt, defaultClassExt)
+
+    println(graphExt.edges.collect.mkString("\n"))
+    println(graphExt.vertices.collect.mkString("\n"))
   }
-  return methodsString
-}*/
+}
