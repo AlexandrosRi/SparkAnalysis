@@ -1,12 +1,14 @@
 import java.io.{File, StringReader}
+import java.nio.file.{FileSystems, Files, Path, Paths}
+import java.net.URI
+import java.util.stream.Collectors
+
 import scala.io.Source
 import scala.collection.JavaConverters._
-
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkConf
 import org.apache.spark.graphx._
 import org.apache.spark.rdd.RDD
-
 import com.github.javaparser.ast.body._
 import com.github.javaparser.ast.expr.{FieldAccessExpr, MethodCallExpr, NameExpr, StringLiteralExpr}
 import com.github.javaparser.ast.stmt.{BlockStmt, ExpressionStmt}
@@ -17,20 +19,32 @@ import com.github.javaparser.{ASTHelper, InstanceJavaParser, JavaParser, StringP
 object SparkAnalysis {
 
   def main(args: Array[String]) {
-    val hdfspath:String = "hdfs://localhost:9000/user/hduser/"
+    val hdfspath: String = "hdfs://192.168.1.6:9000/user/hduser/"
     val outputpathSeq = hdfspath + "outputSeq"
     val outputpathTxt = hdfspath + "outputTxt"
     val conf = new SparkConf().setAppName("Spark Analysis")
     val sc = new SparkContext(conf)
 
+    def time[R](block: => R): R = {
+      val t0 = System.currentTimeMillis()
+      val result = block // call-by-name
+      val t1 = System.currentTimeMillis()
+      println("Elapsed time: " + (t1 - t0) + "ms")
+      result
+    }
+
     /*  Directory parsing helper methods  */
-    def getContext(dir: String): List[(String,String)] = {
-      val files = getListOfFiles(dir)
-      val fnc:List[(String,String)] = files.map(x => (x.getName.stripSuffix(".java"), Source.fromFile(x).mkString + "\n"))
+    def getContext(dir: String): List[(String, String)] = {
+      //val files = getListOfFiles(dir)
+      //val fnc:List[(String,String)] = files.map(x => (x.getName.stripSuffix(".java"), Source.fromFile(x).mkString + "\n"))
+
+      val files = getAllSourceFiles(dir)
+      val fnc: List[(String, String)] = files.map(x => (x.toString.stripSuffix(".java"), Source.fromURI(x.toUri).mkString + "\n"))
+
       fnc
     }
 
-    def getListOfFiles(dir: String):List[File] = {
+    def getListOfFiles(dir: String): List[File] = {
       val d = new File(dir)
       if (d.exists && d.isDirectory) {
         d.listFiles.filter(_.isFile).toList
@@ -39,8 +53,24 @@ object SparkAnalysis {
       }
     }
 
+    //get all files that end with .java by walking the directory
+    def getAllSourceFiles(dir: String): List[Path] = {
+      val d = Paths.get(dir)
+
+      if (Files.exists(d) && Files.isDirectory(d)) {
+        val fejava = Files.walk(d).collect(Collectors.toList()).asScala
+        fejava.filter(x => x.toString.endsWith(".java") && !Files.isDirectory(x)).toList
+      } else {
+        List[Path]()
+      }
+    }
+
+
+
+
+
     /* FIELDS: helper methods and case class  */
-    def getMethodsString(x1: String, javaContent:String) = {
+    def getMethodsString(x1: String, javaContent: String) = {
 
       val in: StringReader = new StringReader(javaContent)
       var methodsString = List("")
@@ -74,7 +104,7 @@ object SparkAnalysis {
         }
       }
 
-      flag match{
+      flag match {
         case false =>
           List("none:n")
         case true =>
@@ -86,8 +116,10 @@ object SparkAnalysis {
       name.toLowerCase.replace(" ", "").hashCode.toLong
     }
 
-    val inputLG = "/home/hduser/input2"
     val inputSM = "/home/hduser/dpl/input"
+    val inputLG = "/home/hduser/input2"
+    val fop = "/home/hduser/dpl/fop/src"
+    val elasticsearch = "/home/hduser/elasticsearch/src"
 
     val inputdata = sc.parallelize(getContext(inputSM))
 
@@ -98,7 +130,7 @@ object SparkAnalysis {
 
     case class ClassData(fqName: String, attrs: List[(String, String)])
     val classes = inputdata.map(x => ClassData(x._1, getMethodsString(x._1, x._2).map(a => {
-       (a.split(":")(0), a.split(":")(1))
+      (a.split(":")(0), a.split(":")(1))
     }))) //      Refactor to make easier filling with only one parsing
 
     /* FIELDS: vertices | edges | graph  */
@@ -112,10 +144,10 @@ object SparkAnalysis {
       }
     }
 
-    val defaultClass = ("Java Native", List(("int","a"), ("String","b")))
+    val defaultClass = ("Java Native", List(("int", "a"), ("String", "b")))
     val graph = Graph(vertices, edges, defaultClass)
 
-//    println(graph.edges.collect.mkString("\n"))
+    //    println(graph.edges.collect.mkString("\n"))
 
 
     /* INHERITANCE: helper methods and case class  */
@@ -132,7 +164,7 @@ object SparkAnalysis {
         for (astType: TypeDeclaration <- types) {
           astType match {
             case astType: ClassOrInterfaceDeclaration =>
-              println(astType.getName + ":" + classHash(astType.getName)+ " extends " + astType.getExtends.toString)
+              println(astType.getName + ":" + classHash(astType.getName) + " extends " + astType.getExtends.toString)
               ext = astType.getExtends.toString.stripSuffix("]").stripPrefix("[")
             case _ =>
           }
@@ -144,21 +176,26 @@ object SparkAnalysis {
       ext
     }
     case class ClassDataExt(fqName: String, ext: String)
-    val classesExt = inputdata.map(x => ClassDataExt(x._1, getExt(x._2)))
+    time {
+      val classesExt = inputdata.map(x => ClassDataExt(x._1, getExt(x._2)))
 
-    /* INHERITANCE: vertices | edges | graph  */
-    val verticesExt: RDD[(VertexId, (String, String))] = classesExt.map(x => (classHash(x.fqName),(x.fqName, x.ext)))
+      /* INHERITANCE: vertices | edges | graph  */
+      val verticesExt: RDD[(VertexId, (String, String))] = classesExt.map(x => (classHash(x.fqName), (x.fqName, x.ext)))
 
-    val edgesExt: RDD[Edge[String]] = classesExt.map { x =>
-      val srcVidExt = classHash(x.fqName)
-      val dstVidExt = classHash(x.ext)
-      Edge(srcVidExt, dstVidExt, "extends")
+      val edgesExt: RDD[Edge[String]] = classesExt.map { x =>
+        val srcVidExt = classHash(x.fqName)
+        val dstVidExt = classHash(x.ext)
+        Edge(srcVidExt, dstVidExt, "extends")
       }
 
-    val defaultClassExt = ("ext","ext")
-    val graphExt = Graph(verticesExt, edgesExt, defaultClassExt)
+      val defaultClassExt = ("ext", "ext")
+      val graphExt = Graph(verticesExt, edgesExt, defaultClassExt)
 
-    println(graphExt.edges.collect.mkString("\n"))
-    println(graphExt.vertices.collect.mkString("\n"))
+      println(graphExt.edges.collect.mkString("\n"))
+      println(graphExt.vertices.collect.mkString("\n"))
+
+      //testing saving in hdfs
+      // graphExt.vertices.saveAsTextFile(outputpathTxt)}
+    }
   }
 }
